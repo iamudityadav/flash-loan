@@ -11,10 +11,10 @@ import "./libraries/UniswapV2Library.sol";
 
 contract FlashLoan {
     using SafeERC20 for IERC20;
+
     //pancakeswap factory and router addresses
     address private constant PANCAKESWAP_FACTORY = 0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73;
     address private constant PANCAKESWAP_ROUTER = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
-
 
     //token addresses
     address private constant BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
@@ -24,6 +24,36 @@ contract FlashLoan {
 
     uint256 private deadline = block.timestamp + 1 days;
     uint256 private constant MAX_INT = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
+
+    function checkResult(uint256 _repayAmount, uint256 _finalTrade) private pure returns(bool) {
+        return _finalTrade > _repayAmount;
+    }
+
+    function getBalance(address _token) public view returns(uint256) {
+        return IERC20(_token).balanceOf(address(this));
+    }
+
+    function placeTrade(address _from, address _to, uint256 _amount) private returns(uint256) {
+        address liquidity_pool = IUniswapV2Factory(PANCAKESWAP_FACTORY).getPair(_from, _to);
+        require(liquidity_pool != address(0), "Liquidity pool does not exist.");
+        
+        address[] memory path = new address[](2);
+        path[0] = _from;
+        path[1] = _to;
+
+        uint256 amountRequired = IUniswapV2Router01(PANCAKESWAP_ROUTER).getAmountsOut(_amount, path)[1];
+        uint256 amountReceived = IUniswapV2Router01(PANCAKESWAP_ROUTER)
+                                    .swapExactTokensForTokens(
+                                        _amount,
+                                        amountRequired,
+                                        path,
+                                        address(this),
+                                        deadline
+                                    )[1];
+
+        require(amountReceived > 0, "Transaction aborted.");
+        return amountReceived;    
+    }
 
     function initiateArbitrage(address _busdBorrow, uint256 _amount) public {
         IERC20(BUSD).safeApprove(PANCAKESWAP_ROUTER, MAX_INT);
@@ -39,8 +69,36 @@ contract FlashLoan {
         uint256 amount0Out = _busdBorrow==token0?_amount:0; 
         uint256 amount1Out = _busdBorrow==token1?_amount:0;
 
-        bytes memory data = abi.encode(_busdBorrow, _amount);
+        bytes memory data = abi.encode(_busdBorrow, _amount, msg.sender);
         IUniswapV2Pair(liquidity_pool).swap(amount0Out, amount1Out, address(this), data);
     }
 
+    function pancakeCall(address _sender, uint256 _amount0, uint256 _amount1, bytes calldata _data) external {
+        address token0 = IUniswapV2Pair(msg.sender).token0();
+        address token1 = IUniswapV2Pair(msg.sender).token1();
+
+        address liquidity_pool = IUniswapV2Factory(PANCAKESWAP_FACTORY).getPair(token0, token1);
+        require(msg.sender == liquidity_pool, "Liquidity pool does not match.");
+        require(_sender == address(this), "_sender  does not match.");
+
+        (address busdBorrow, uint256 amount, address myAccount) = abi.decode(_data, (address, uint256, address));
+
+        //fee calculation
+        uint256 fee = ((amount * 3) / 997) + 1;
+        uint256 repayAmount = amount + fee;
+
+        uint256 loanAmount = _amount0 > 0 ? _amount0 : _amount1;
+
+        //triangular arbitrage
+        uint256 trade1 = placeTrade(BUSD, CROX, loanAmount);
+        uint256 trade2 = placeTrade(CROX, CAKE, trade1);
+        uint256 trade3 = placeTrade(CAKE, BUSD, trade2);
+
+        bool result = checkResult(repayAmount, trade3);
+        require(result, "Arbitrage is not profitable.");
+
+        uint256 profit = trade3 - repayAmount;
+        IERC20(BUSD).safeTransfer(myAccount, profit);
+        IERC20(busdBorrow).safeTransfer(liquidity_pool,repayAmount);
+    }
 }
