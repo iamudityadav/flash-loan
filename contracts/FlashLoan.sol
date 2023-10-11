@@ -5,9 +5,7 @@ import "./interfaces/IERC20.sol";
 import "./interfaces/IUniswapV2Factory.sol";
 import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/IUniswapV2Router01.sol";
-import "./interfaces/IUniswapV2Router02.sol";
 import "./libraries/SafeERC20.sol";
-import "./libraries/UniswapV2Library.sol";
 
 contract FlashLoan {
     using SafeERC20 for IERC20;
@@ -17,7 +15,6 @@ contract FlashLoan {
     address private constant PANCAKESWAP_ROUTER = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
 
     //token addresses
-    address private constant BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
     address private constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     address private constant CAKE = 0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82;
     address private constant CROX = 0x2c094F5A7D1146BB93850f629501eB749f6Ed491;
@@ -29,7 +26,7 @@ contract FlashLoan {
         return _finalTrade > _repayAmount;
     }
 
-    function getBalance(address _token) public view returns(uint256) {
+    function getBalanceOfToken(address _token) public view returns(uint256) {
         return IERC20(_token).balanceOf(address(this));
     }
 
@@ -55,21 +52,21 @@ contract FlashLoan {
         return amountReceived;    
     }
 
-    function initiateArbitrage(address _busdBorrow, uint256 _amount) public {
-        IERC20(BUSD).safeApprove(PANCAKESWAP_ROUTER, MAX_INT);
+    function initiateArbitrage(address _tokenBorrow, uint256 _amount) external {
+        IERC20(_tokenBorrow).safeApprove(PANCAKESWAP_ROUTER, MAX_INT);
         IERC20(CROX).safeApprove(PANCAKESWAP_ROUTER, MAX_INT);
         IERC20(CAKE).safeApprove(PANCAKESWAP_ROUTER, MAX_INT);
 
-        address liquidity_pool = IUniswapV2Factory(PANCAKESWAP_FACTORY).getPair(_busdBorrow, WBNB);
+        address liquidity_pool = IUniswapV2Factory(PANCAKESWAP_FACTORY).getPair(_tokenBorrow, WBNB);
         require(liquidity_pool != address(0), "Liquidity pool does not exist.");
 
         address token0 = IUniswapV2Pair(liquidity_pool).token0();
         address token1 = IUniswapV2Pair(liquidity_pool).token1();
 
-        uint256 amount0Out = _busdBorrow==token0?_amount:0; 
-        uint256 amount1Out = _busdBorrow==token1?_amount:0;
+        uint256 amount0Out = _tokenBorrow==token0?_amount:0; 
+        uint256 amount1Out = _tokenBorrow==token1?_amount:0;
 
-        bytes memory data = abi.encode(_busdBorrow, _amount, msg.sender);
+        bytes memory data = abi.encode(_tokenBorrow, _amount, msg.sender);
         IUniswapV2Pair(liquidity_pool).swap(amount0Out, amount1Out, address(this), data);
     }
 
@@ -81,24 +78,22 @@ contract FlashLoan {
         require(msg.sender == liquidity_pool, "Liquidity pool does not match.");
         require(_sender == address(this), "_sender  does not match.");
 
-        (address busdBorrow, uint256 amount, address myAccount) = abi.decode(_data, (address, uint256, address));
+        (address tokenBorrow, uint256 amount, address myAccount) = abi.decode(_data, (address, uint256, address));
 
-        //fee calculation
         uint256 fee = ((amount * 3) / 997) + 1;
         uint256 repayAmount = amount + fee;
-
         uint256 loanAmount = _amount0 > 0 ? _amount0 : _amount1;
 
         //triangular arbitrage
-        uint256 trade1 = placeTrade(BUSD, CROX, loanAmount);
+        uint256 trade1 = placeTrade(tokenBorrow, CROX, loanAmount);
         uint256 trade2 = placeTrade(CROX, CAKE, trade1);
-        uint256 trade3 = placeTrade(CAKE, BUSD, trade2);
+        uint256 trade3 = placeTrade(CAKE, tokenBorrow, trade2);
 
-        bool result = checkResult(repayAmount, trade3);
-        require(result, "Arbitrage is not profitable.");
+        bool isProfitable = checkResult(repayAmount, trade3);
+        require(isProfitable, "Arbitrage is not profitable.");
 
         uint256 profit = trade3 - repayAmount;
-        IERC20(BUSD).safeTransfer(myAccount, profit);
-        IERC20(busdBorrow).safeTransfer(liquidity_pool,repayAmount);
+        IERC20(tokenBorrow).safeTransfer(myAccount, profit);
+        IERC20(tokenBorrow).safeTransfer(liquidity_pool, repayAmount);
     }
 }
